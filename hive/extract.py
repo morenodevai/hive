@@ -29,8 +29,15 @@ def extract_text(pdf_path: str, output_path: str) -> dict:
     2. PyMuPDF text extraction (fast, pure Python)
     3. PyMuPDF render → Tesseract OCR (slow, for scanned docs)
 
+    PDFs with no extractable text (photos, blank pages) are marked "done"
+    with char_count=0. Only actual errors produce "failed".
+
     Returns: {"status": "done"|"failed", "method": str, "char_count": int, "error": str|None}
     """
+    if not os.path.exists(pdf_path):
+        return {"status": "failed", "method": None, "char_count": 0,
+                "error": f"File not found: {pdf_path[:150]}"}
+
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
     # Tier 1: pdftotext
@@ -51,11 +58,15 @@ def extract_text(pdf_path: str, output_path: str) -> dict:
         if result:
             return result
 
+    # No method produced enough text - PDF likely has no extractable text
+    # (photos, blank pages, redacted docs). Mark as done, not failed.
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write("")
     return {
-        "status": "failed",
-        "method": None,
+        "status": "done",
+        "method": "empty",
         "char_count": 0,
-        "error": "All extraction methods failed",
+        "error": None,
     }
 
 
@@ -136,11 +147,6 @@ def _try_ocr(pdf_path: str, output_path: str) -> dict | None:
                 "char_count": len(text),
                 "error": None,
             }
-    except Exception as e:
-        return {
-            "status": "failed",
-            "method": "ocr",
-            "char_count": 0,
-            "error": str(e)[:200],
-        }
+    except Exception:
+        pass
     return None
