@@ -80,7 +80,7 @@ def pull_tasks(worker: str, batch_size: int) -> list[dict]:
     c = _conn()
     now = time.time()
     rows = c.execute(
-        "SELECT id, pdf_path FROM tasks WHERE status='pending' LIMIT ?",
+        "SELECT id, pdf_path, text_path FROM tasks WHERE status='pending' LIMIT ?",
         (batch_size,),
     ).fetchall()
     if not rows:
@@ -94,7 +94,7 @@ def pull_tasks(worker: str, batch_size: int) -> list[dict]:
         [worker, now] + ids,
     )
     c.commit()
-    return [{"task_id": r["id"], "pdf_path": r["pdf_path"]} for r in rows]
+    return [{"task_id": r["id"], "pdf_path": r["pdf_path"], "text_path": r["text_path"]} for r in rows]
 
 
 def report_results(results: list[dict]):

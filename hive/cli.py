@@ -35,6 +35,10 @@ def main():
                       help="Local path to PDFs (skip download)")
     wrk.add_argument("--local-text-dir",
                       help="Local path to write text output")
+    wrk.add_argument("--pdf-ssh",
+                      help="SSH source for PDFs: user@host (worker fetches directly via SCP)")
+    wrk.add_argument("--text-ssh",
+                      help="SSH dest for text: user@host (worker writes directly via SCP)")
     wrk.add_argument("--name", help="Worker name (default: hostname)")
 
     # --- status ---
@@ -65,6 +69,8 @@ def main():
             batch_size=args.batch_size,
             local_pdf_dir=args.local_pdf_dir,
             local_text_dir=args.local_text_dir,
+            pdf_ssh=args.pdf_ssh,
+            text_ssh=args.text_ssh,
             name=args.name,
         )
 

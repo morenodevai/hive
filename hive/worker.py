@@ -113,18 +113,72 @@ def _signal_handler(sig, frame):
     _shutdown = True
 
 
+def _ssh_download(ssh_target: str, remote_path: str, local_path: str) -> bool:
+    """Download a file via SCP directly from remote host."""
+    try:
+        result = subprocess.run(
+            ["scp", "-q", f"{ssh_target}:{remote_path}", local_path],
+            capture_output=True, timeout=120,
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
+def _ssh_upload(ssh_target: str, local_path: str, remote_path: str) -> bool:
+    """Upload a file via SCP directly to remote host."""
+    try:
+        # Ensure remote directory exists
+        remote_dir = os.path.dirname(remote_path)
+        subprocess.run(
+            ["ssh", ssh_target, "mkdir", "-p", f'"{remote_dir}"'],
+            capture_output=True, timeout=10,
+        )
+        result = subprocess.run(
+            ["scp", "-q", local_path, f"{ssh_target}:{remote_path}"],
+            capture_output=True, timeout=120,
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
+def _get_text_path(pdf_path: str) -> str:
+    """Derive relative text output path from pdf_path."""
+    parts = pdf_path.replace("\\", "/").split("/")
+    try:
+        idx = parts.index("pdfs")
+        rel = "/".join(parts[idx + 1:])
+    except ValueError:
+        rel = os.path.basename(pdf_path)
+    return os.path.splitext(rel)[0] + ".txt"
+
+
 def _process_task(task: dict, local_pdf_dir: str | None, local_text_dir: str | None,
+                  pdf_ssh: str | None, text_ssh: str | None,
                   coordinator_url: str) -> dict:
     """Process a single task. Runs in a subprocess via ProcessPoolExecutor."""
     task_id = task["task_id"]
     pdf_path = task["pdf_path"]
+    text_rel = _get_text_path(pdf_path)
+    cleanup_pdf = False
+    cleanup_text = False
 
     try:
-        # Determine where to read the PDF from
+        # --- Get the PDF ---
         if local_pdf_dir:
             local_pdf = pdf_path  # Already a full local path
+        elif pdf_ssh:
+            # SCP directly from remote host
+            tmp = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
+            tmp.close()
+            local_pdf = tmp.name
+            cleanup_pdf = True
+            if not _ssh_download(pdf_ssh, pdf_path, local_pdf):
+                return {"task_id": task_id, "status": "failed",
+                        "error": f"SCP download failed: {pdf_path[:100]}"}
         else:
-            # Download from coordinator
+            # Download from coordinator (slowest)
             resp = requests.get(f"{coordinator_url}/files/{task_id}", timeout=120)
             if resp.status_code != 200:
                 return {"task_id": task_id, "status": "failed",
@@ -133,38 +187,39 @@ def _process_task(task: dict, local_pdf_dir: str | None, local_text_dir: str | N
             tmp.write(resp.content)
             tmp.close()
             local_pdf = tmp.name
+            cleanup_pdf = True
 
-        # Determine output path
+        # --- Determine text output path ---
         if local_text_dir:
-            # Mirror the directory structure
-            # pdf_path is the full source path, we need the relative part
-            # We'll derive it from the filename
-            basename = os.path.splitext(os.path.basename(pdf_path))[0] + ".txt"
-            # Try to preserve subdirectory structure
-            parts = pdf_path.replace("\\", "/").split("/")
-            # Find 'pdfs' in path and take everything after it
-            try:
-                idx = parts.index("pdfs")
-                rel = "/".join(parts[idx + 1:])
-            except ValueError:
-                rel = basename
-            text_out = os.path.join(local_text_dir, os.path.splitext(rel)[0] + ".txt")
+            text_out = os.path.join(local_text_dir, text_rel)
         else:
             text_out = tempfile.NamedTemporaryFile(suffix=".txt", delete=False).name
+            cleanup_text = not text_ssh  # only cleanup if not uploading via SSH
 
-        # Extract
+        # --- Extract ---
         result = extract_text(local_pdf, text_out)
         result["task_id"] = task_id
 
-        # Upload text if not writing locally
+        # --- Write text output ---
         if not local_text_dir and result["status"] == "done" and os.path.exists(text_out):
-            with open(text_out, "rb") as f:
-                requests.post(f"{coordinator_url}/files/upload/{task_id}",
-                              data=f.read(), timeout=120)
-            os.unlink(text_out)
+            if text_ssh:
+                # SCP directly to remote host
+                remote_text = task.get("text_path", "")
+                if not remote_text:
+                    # Derive from pdf_path pattern
+                    remote_text = pdf_path.replace("/pdfs/", "/text/")
+                    remote_text = os.path.splitext(remote_text)[0] + ".txt"
+                _ssh_upload(text_ssh, text_out, remote_text)
+                os.unlink(text_out)
+            else:
+                # Upload to coordinator
+                with open(text_out, "rb") as f:
+                    requests.post(f"{coordinator_url}/files/upload/{task_id}",
+                                  data=f.read(), timeout=120)
+                os.unlink(text_out)
 
-        # Clean up downloaded PDF
-        if not local_pdf_dir and os.path.exists(local_pdf):
+        # Cleanup
+        if cleanup_pdf and os.path.exists(local_pdf):
             os.unlink(local_pdf)
 
         return result
@@ -176,7 +231,8 @@ def _process_task(task: dict, local_pdf_dir: str | None, local_text_dir: str | N
 
 def run_worker(coordinator: str, cpus: int, batch_size: int,
                local_pdf_dir: str | None, local_text_dir: str | None,
-               name: str | None):
+               pdf_ssh: str | None = None, text_ssh: str | None = None,
+               name: str | None = None):
     global _shutdown
 
     signal.signal(signal.SIGINT, _signal_handler)
@@ -198,6 +254,10 @@ def run_worker(coordinator: str, cpus: int, batch_size: int,
         print(f"[worker:{name}] Local PDF dir: {local_pdf_dir}")
     if local_text_dir:
         print(f"[worker:{name}] Local text dir: {local_text_dir}")
+    if pdf_ssh:
+        print(f"[worker:{name}] PDF via SSH: {pdf_ssh}")
+    if text_ssh:
+        print(f"[worker:{name}] Text via SSH: {text_ssh}")
 
     # Register with coordinator
     while not _shutdown:
@@ -238,7 +298,8 @@ def run_worker(coordinator: str, cpus: int, batch_size: int,
             with ProcessPoolExecutor(max_workers=cpus) as executor:
                 futures = {
                     executor.submit(
-                        _process_task, task, local_pdf_dir, local_text_dir, coordinator_url
+                        _process_task, task, local_pdf_dir, local_text_dir,
+                        pdf_ssh, text_ssh, coordinator_url
                     ): task
                     for task in tasks
                 }
