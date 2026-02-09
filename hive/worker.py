@@ -26,24 +26,60 @@ def _collect_system_stats() -> dict:
         "cpu_temp": None,
     }
 
-    # CPU temperature
-    temps = psutil.sensors_temperatures() if hasattr(psutil, "sensors_temperatures") else {}
-    if temps:
-        # Linux: coretemp or k10temp; Mac: handled differently
-        for chip in ("coretemp", "k10temp", "cpu_thermal", "cpu-thermal"):
-            if chip in temps and temps[chip]:
-                stats["cpu_temp"] = temps[chip][0].current
-                break
-        # Fallback: first available sensor
-        if stats["cpu_temp"] is None:
-            for entries in temps.values():
-                if entries:
-                    stats["cpu_temp"] = entries[0].current
+    # CPU temperature - platform specific
+    try:
+        temps = psutil.sensors_temperatures() if hasattr(psutil, "sensors_temperatures") else {}
+        if temps:
+            # Linux: coretemp, k10temp, etc
+            for chip in ("coretemp", "k10temp", "cpu_thermal", "cpu-thermal", "nvme", "acpitz"):
+                if chip in temps and temps[chip]:
+                    stats["cpu_temp"] = temps[chip][0].current
                     break
+            # Fallback: first available sensor
+            if stats["cpu_temp"] is None:
+                for entries in temps.values():
+                    if entries:
+                        stats["cpu_temp"] = entries[0].current
+                        break
+    except Exception:
+        pass
 
-    # Mac CPU temp via powermetrics isn't worth the overhead; skip gracefully
+    # Mac: try /usr/bin/sysctl (if available)
+    if stats["cpu_temp"] is None and sys.platform == "darwin":
+        try:
+            out = subprocess.run(
+                ["sysctl", "-n", "machdep.cpu.temperature"],
+                capture_output=True, text=True, timeout=2,
+            )
+            if out.returncode == 0:
+                stats["cpu_temp"] = round(float(out.stdout.strip()), 1)
+        except Exception:
+            pass
 
-    # GPU stats via nvidia-smi
+    # Windows: try WMI via wmic (if available)
+    if stats["cpu_temp"] is None and sys.platform == "win32":
+        try:
+            out = subprocess.run(
+                ["wmic", "os", "get", "CurrentTimeZone"],
+                capture_output=True, text=True, timeout=2,
+            )
+            # If wmic works, try getting CPU temp (varies by system)
+            if out.returncode == 0:
+                out = subprocess.run(
+                    ["wmic", "path", "win32_temperaturemonitor", "get", "CurrentReading"],
+                    capture_output=True, text=True, timeout=2,
+                )
+                if out.returncode == 0 and "CurrentReading" in out.stdout:
+                    try:
+                        lines = [l.strip() for l in out.stdout.split('\n') if l.strip() and l.strip() != 'CurrentReading']
+                        if lines:
+                            stats["cpu_temp"] = round(int(lines[0]) / 10, 1)  # WMI returns in 0.1K units
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+    # GPU stats via nvidia-smi (works on Linux with Nvidia GPUs)
     try:
         out = subprocess.run(
             ["nvidia-smi", "--query-gpu=utilization.gpu,temperature.gpu",
@@ -52,8 +88,12 @@ def _collect_system_stats() -> dict:
         )
         if out.returncode == 0:
             parts = out.stdout.strip().split(",")
-            stats["gpu_pct"] = float(parts[0].strip())
-            stats["gpu_temp"] = float(parts[1].strip())
+            if len(parts) >= 2:
+                try:
+                    stats["gpu_pct"] = float(parts[0].strip())
+                    stats["gpu_temp"] = float(parts[1].strip())
+                except ValueError:
+                    pass
     except (FileNotFoundError, Exception):
         pass
 
