@@ -129,6 +129,13 @@ def list_workers():
     return jsonify(db.get_workers())
 
 
+@app.route("/workers/stats", methods=["POST"])
+def worker_stats():
+    data = request.json
+    db.update_worker_stats(data["name"], data["stats"])
+    return jsonify({"status": "ok"})
+
+
 @app.route("/tasks/pull", methods=["POST"])
 def pull_tasks():
     data = request.json
@@ -208,7 +215,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <title>Hive Dashboard</title>
 <style>
   * { margin:0; padding:0; box-sizing:border-box; }
-  body { background:#0a0a0f; color:#e0e0e0; font-family:'SF Mono',monospace; padding:24px; }
+  body { background:#0a0a0f; color:#e0e0e0; font-family:'SF Mono','Cascadia Code',monospace; padding:24px; }
   h1 { font-size:20px; color:#7c6ff7; margin-bottom:20px; }
   .cards { display:flex; gap:16px; margin-bottom:20px; flex-wrap:wrap; }
   .card { background:#14141f; border:1px solid #222; border-radius:10px; padding:16px 24px; min-width:140px; }
@@ -217,7 +224,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   .progress-bar { background:#14141f; border-radius:8px; height:28px; margin-bottom:20px; overflow:hidden; border:1px solid #222; position:relative; }
   .progress-fill { height:100%; background:linear-gradient(90deg,#7c6ff7,#a78bfa); transition:width 0.5s; border-radius:8px; }
   .progress-text { position:absolute; right:12px; top:5px; font-size:13px; color:#fff; }
-  table { width:100%; border-collapse:collapse; margin-bottom:20px; }
+  table { width:100%; border-collapse:collapse; }
   th { text-align:left; padding:8px 12px; color:#888; font-size:11px; text-transform:uppercase; border-bottom:1px solid #222; }
   td { padding:8px 12px; border-bottom:1px solid #1a1a2a; font-size:13px; }
   .status-working { color:#4ade80; }
@@ -228,6 +235,15 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   .footer { font-size:11px; color:#555; margin-top:12px; }
   .methods span { display:inline-block; margin-right:16px; }
   .methods .pct { color:#7c6ff7; }
+  .bar-bg { background:#1a1a2a; border-radius:4px; height:8px; width:100px; display:inline-block; vertical-align:middle; overflow:hidden; }
+  .bar-fill { height:100%; border-radius:4px; transition:width 0.5s; }
+  .bar-cpu { background:linear-gradient(90deg,#4ade80,#f59e0b,#ef4444); }
+  .bar-ram { background:linear-gradient(90deg,#60a5fa,#a78bfa); }
+  .temp { font-size:12px; }
+  .temp-ok { color:#4ade80; }
+  .temp-warm { color:#f59e0b; }
+  .temp-hot { color:#ef4444; }
+  .gpu-badge { background:#1e1e3a; border:1px solid #333; border-radius:4px; padding:1px 6px; font-size:11px; color:#a78bfa; }
 </style>
 </head>
 <body>
@@ -248,7 +264,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <div class="section">
   <h2>Workers</h2>
   <table>
-    <thead><tr><th>Worker</th><th>Cores</th><th>Done</th><th>Failed</th><th>Last Seen</th><th>Status</th></tr></thead>
+    <thead><tr>
+      <th>Worker</th><th>Cores</th><th>CPU</th><th>RAM</th><th>Temp</th><th>GPU</th>
+      <th>Done</th><th>Failed</th><th>Status</th>
+    </tr></thead>
     <tbody id="workers"></tbody>
   </table>
 </div>
@@ -281,12 +300,16 @@ function fmtEta(secs) {
   return h > 0 ? h + 'h ' + m + 'm' : m + 'm';
 }
 
-function timeAgo(ts) {
-  if (!ts) return '-';
-  const d = Math.floor(Date.now()/1000 - ts);
-  if (d < 10) return 'now';
-  if (d < 60) return d + 's ago';
-  return Math.floor(d/60) + 'm ago';
+function tempClass(t) {
+  if (t === null || t === undefined) return 'temp-ok';
+  if (t < 60) return 'temp-ok';
+  if (t < 80) return 'temp-warm';
+  return 'temp-hot';
+}
+
+function bar(pct, cls) {
+  const p = Math.min(100, Math.max(0, pct || 0));
+  return '<div class="bar-bg"><div class="bar-fill '+cls+'" style="width:'+p+'%"></div></div> '+Math.round(p)+'%';
 }
 
 async function refresh() {
@@ -304,14 +327,37 @@ async function refresh() {
     document.getElementById('pbar').style.width = pct + '%';
     document.getElementById('ppct').textContent = pct.toFixed(1) + '%';
 
-    // Workers
+    // Workers with system stats
     const wb = document.getElementById('workers');
     wb.innerHTML = '';
     (d.workers || []).forEach(w => {
       const stale = (Date.now()/1000 - w.last_seen) > 60;
       const cls = stale ? 'status-stale' : 'status-working';
       const label = stale ? 'stale' : 'working';
-      wb.innerHTML += '<tr><td>'+w.name+'</td><td>'+w.cores+'</td><td>'+fmt(w.tasks_completed)+'</td><td>'+w.tasks_failed+'</td><td>'+timeAgo(w.last_seen)+'</td><td class="'+cls+'">'+label+'</td></tr>';
+
+      const ramPct = w.ram_total_gb > 0 ? (w.ram_used_gb / w.ram_total_gb * 100) : 0;
+      const ramStr = bar(ramPct, 'bar-ram') + ' <span style="color:#666;font-size:11px;">'+
+        (w.ram_used_gb||0).toFixed(1)+'/'+( w.ram_total_gb||0).toFixed(0)+'G</span>';
+
+      const cpuStr = bar(w.cpu_pct, 'bar-cpu');
+
+      let tempStr = '-';
+      if (w.cpu_temp !== null && w.cpu_temp !== undefined) {
+        tempStr = '<span class="temp '+tempClass(w.cpu_temp)+'">'+Math.round(w.cpu_temp)+'&deg;C</span>';
+      }
+
+      let gpuStr = '-';
+      if (w.gpu_pct !== null && w.gpu_pct !== undefined) {
+        gpuStr = '<span class="gpu-badge">'+Math.round(w.gpu_pct)+'%</span>';
+        if (w.gpu_temp !== null && w.gpu_temp !== undefined) {
+          gpuStr += ' <span class="temp '+tempClass(w.gpu_temp)+'">'+Math.round(w.gpu_temp)+'&deg;C</span>';
+        }
+      }
+
+      wb.innerHTML += '<tr><td>'+w.name+'</td><td>'+w.cores+'</td>'+
+        '<td>'+cpuStr+'</td><td>'+ramStr+'</td><td>'+tempStr+'</td><td>'+gpuStr+'</td>'+
+        '<td>'+fmt(w.tasks_completed)+'</td><td>'+w.tasks_failed+'</td>'+
+        '<td class="'+cls+'">'+label+'</td></tr>';
     });
 
     // Breakdown

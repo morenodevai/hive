@@ -1,16 +1,63 @@
 import os
 import platform
 import signal
+import subprocess
 import sys
 import tempfile
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
+import psutil
 import requests
 
 from hive.extract import extract_text
 
 _shutdown = False
+
+
+def _collect_system_stats() -> dict:
+    """Collect CPU, RAM, GPU, and temperature stats."""
+    stats = {
+        "cpu_pct": psutil.cpu_percent(interval=None),
+        "ram_used_gb": round((psutil.virtual_memory().used) / (1024**3), 1),
+        "ram_total_gb": round((psutil.virtual_memory().total) / (1024**3), 1),
+        "gpu_pct": None,
+        "gpu_temp": None,
+        "cpu_temp": None,
+    }
+
+    # CPU temperature
+    temps = psutil.sensors_temperatures() if hasattr(psutil, "sensors_temperatures") else {}
+    if temps:
+        # Linux: coretemp or k10temp; Mac: handled differently
+        for chip in ("coretemp", "k10temp", "cpu_thermal", "cpu-thermal"):
+            if chip in temps and temps[chip]:
+                stats["cpu_temp"] = temps[chip][0].current
+                break
+        # Fallback: first available sensor
+        if stats["cpu_temp"] is None:
+            for entries in temps.values():
+                if entries:
+                    stats["cpu_temp"] = entries[0].current
+                    break
+
+    # Mac CPU temp via powermetrics isn't worth the overhead; skip gracefully
+
+    # GPU stats via nvidia-smi
+    try:
+        out = subprocess.run(
+            ["nvidia-smi", "--query-gpu=utilization.gpu,temperature.gpu",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if out.returncode == 0:
+            parts = out.stdout.strip().split(",")
+            stats["gpu_pct"] = float(parts[0].strip())
+            stats["gpu_temp"] = float(parts[1].strip())
+    except (FileNotFoundError, Exception):
+        pass
+
+    return stats
 
 
 def _signal_handler(sig, frame):
@@ -164,7 +211,7 @@ def run_worker(coordinator: str, cpus: int, batch_size: int,
                             "char_count": 0,
                         })
 
-            # Report results
+            # Report results + system stats
             if results:
                 for r in results:
                     r["worker"] = name
@@ -179,6 +226,17 @@ def run_worker(coordinator: str, cpus: int, batch_size: int,
                     print(f"[worker:{name}] Reported: {done} done, {failed} failed")
                 except Exception as e:
                     print(f"[worker:{name}] Failed to report results: {e}")
+
+                # Send system stats
+                try:
+                    stats = _collect_system_stats()
+                    requests.post(
+                        f"{coordinator_url}/workers/stats",
+                        json={"name": name, "stats": stats},
+                        timeout=10,
+                    )
+                except Exception:
+                    pass
 
         except requests.ConnectionError:
             print(f"[worker:{name}] Lost connection, retrying in 10s...")

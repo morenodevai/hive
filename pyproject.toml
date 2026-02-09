@@ -13,6 +13,7 @@ dependencies = [
     "PyMuPDF>=1.24",
     "pytesseract>=0.3",
     "Pillow>=10.0",
+    "psutil>=5.9",
 ]
 
 [project.scripts]

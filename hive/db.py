@@ -39,7 +39,13 @@ def init_db():
             cores INTEGER,
             last_seen REAL,
             tasks_completed INTEGER DEFAULT 0,
-            tasks_failed INTEGER DEFAULT 0
+            tasks_failed INTEGER DEFAULT 0,
+            cpu_pct REAL DEFAULT 0,
+            ram_used_gb REAL DEFAULT 0,
+            ram_total_gb REAL DEFAULT 0,
+            gpu_pct REAL,
+            gpu_temp REAL,
+            cpu_temp REAL
         );
 
         CREATE TABLE IF NOT EXISTS rate_log (
@@ -151,6 +157,18 @@ def register_worker(name: str, ip: str, cores: int):
 def heartbeat_worker(name: str):
     c = _conn()
     c.execute("UPDATE workers SET last_seen=? WHERE name=?", (time.time(), name))
+    c.commit()
+
+
+def update_worker_stats(name: str, stats: dict):
+    c = _conn()
+    c.execute(
+        "UPDATE workers SET cpu_pct=?, ram_used_gb=?, ram_total_gb=?, "
+        "gpu_pct=?, gpu_temp=?, cpu_temp=?, last_seen=? WHERE name=?",
+        (stats.get("cpu_pct"), stats.get("ram_used_gb"), stats.get("ram_total_gb"),
+         stats.get("gpu_pct"), stats.get("gpu_temp"), stats.get("cpu_temp"),
+         time.time(), name),
+    )
     c.commit()
 
 
