@@ -1,2 +1,0 @@
-[console_scripts]
-hive = hive.cli:main
