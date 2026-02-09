@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hive-tasks"
+version = "0.1.0"
+description = "Distributed task processing tool"
+requires-python = ">=3.9"
+dependencies = [
+    "flask>=3.0",
+    "requests>=2.31",
+    "PyMuPDF>=1.24",
+    "pytesseract>=0.3",
+    "Pillow>=10.0",
+]
+
+[project.scripts]
+hive = "hive.cli:main"
