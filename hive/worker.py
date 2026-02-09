@@ -30,17 +30,23 @@ def _collect_system_stats() -> dict:
     try:
         temps = psutil.sensors_temperatures() if hasattr(psutil, "sensors_temperatures") else {}
         if temps:
-            # Linux: coretemp, k10temp, etc
-            for chip in ("coretemp", "k10temp", "cpu_thermal", "cpu-thermal", "nvme", "acpitz"):
+            # Linux: k10temp (AMD) is most reliable, then coretemp (Intel)
+            for chip in ("k10temp", "coretemp", "cpu_thermal", "cpu-thermal", "acpitz"):
                 if chip in temps and temps[chip]:
                     stats["cpu_temp"] = temps[chip][0].current
                     break
-            # Fallback: first available sensor
+            # Fallback: first available sensor that isn't auxiliary
             if stats["cpu_temp"] is None:
-                for entries in temps.values():
-                    if entries:
-                        stats["cpu_temp"] = entries[0].current
+                for chip_name in sorted(temps.keys()):
+                    if "aux" not in chip_name.lower() and temps[chip_name]:
+                        stats["cpu_temp"] = temps[chip_name][0].current
                         break
+                # Last resort: any sensor
+                if stats["cpu_temp"] is None:
+                    for entries in temps.values():
+                        if entries:
+                            stats["cpu_temp"] = entries[0].current
+                            break
     except Exception:
         pass
 
