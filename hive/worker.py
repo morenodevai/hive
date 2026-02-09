@@ -30,23 +30,24 @@ def _collect_system_stats() -> dict:
     try:
         temps = psutil.sensors_temperatures() if hasattr(psutil, "sensors_temperatures") else {}
         if temps:
-            # Linux: k10temp (AMD) is most reliable, then coretemp (Intel)
-            for chip in ("k10temp", "coretemp", "cpu_thermal", "cpu-thermal", "acpitz"):
-                if chip in temps and temps[chip]:
-                    stats["cpu_temp"] = temps[chip][0].current
-                    break
-            # Fallback: first available sensor that isn't auxiliary
-            if stats["cpu_temp"] is None:
-                for chip_name in sorted(temps.keys()):
-                    if "aux" not in chip_name.lower() and temps[chip_name]:
-                        stats["cpu_temp"] = temps[chip_name][0].current
+            # Linux: k10temp (AMD) - prefer Tctl (core temp) over Tccd
+            if "k10temp" in temps:
+                for entry in temps["k10temp"]:
+                    if "tctl" in entry.label.lower():
+                        stats["cpu_temp"] = entry.current
                         break
-                # Last resort: any sensor
-                if stats["cpu_temp"] is None:
-                    for entries in temps.values():
-                        if entries:
-                            stats["cpu_temp"] = entries[0].current
-                            break
+                # Fallback to first k10temp entry if Tctl not found
+                if stats["cpu_temp"] is None and temps["k10temp"]:
+                    stats["cpu_temp"] = temps["k10temp"][0].current
+            # Intel: coretemp
+            elif "coretemp" in temps and temps["coretemp"]:
+                stats["cpu_temp"] = temps["coretemp"][0].current
+            # Other thermal sensors
+            else:
+                for chip in ("cpu_thermal", "cpu-thermal", "acpitz"):
+                    if chip in temps and temps[chip]:
+                        stats["cpu_temp"] = temps[chip][0].current
+                        break
     except Exception:
         pass
 
